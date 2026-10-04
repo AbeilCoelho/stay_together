@@ -1,0 +1,218 @@
+from datetime import datetime, timedelta
+import math
+
+from flask import Blueprint, jsonify, request
+from flask_login import current_user, login_required
+
+from ..models import Post, Reaction, User, db
+
+api_bp = Blueprint("api", __name__)
+
+
+def haversine(lat1, lon1, lat2, lon2):
+    if None in (lat1, lon1, lat2, lon2):
+        return 0
+    R = 6371
+    a = (
+        math.sin(math.radians(lat2 - lat1) / 2) ** 2
+        + math.cos(math.radians(lat1))
+        * math.cos(math.radians(lat2))
+        * math.sin(math.radians(lon2 - lon1) / 2) ** 2
+    )
+    return round(R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a)))
+
+
+# NEW: Serializes a post AND its nested replies (Facebook style)
+def serialize_post(p, is_reply=False):
+    reaction_data = {}
+    for r in p.reactions:
+        if r.emoji not in reaction_data:
+            reaction_data[r.emoji] = {"count": 0, "reacted_by_me": False}
+        reaction_data[r.emoji]["count"] += 1
+        if r.user_id == current_user.id:
+            reaction_data[r.emoji]["reacted_by_me"] = True
+
+    data = {
+        "id": p.id,
+        "sender": p.sender.username,
+        "is_mine": p.sender_id == current_user.id,
+        "is_secret": p.is_secret,
+        "text_content": p.text_content,
+        "media_data": p.media_data,
+        "media_type": p.media_type,
+        "time_iso": p.created_at.isoformat() + "Z",
+        "time": p.created_at.strftime("%H:%M %b %d"),
+        "reactions": reaction_data,
+    }
+
+    # Only fetch replies if this is a main post (prevents infinite loops)
+    if not is_reply:
+        sorted_replies = sorted(p.replies, key=lambda x: x.created_at)
+        data["replies"] = [serialize_post(r, is_reply=True) for r in sorted_replies]
+
+    return data
+
+
+@api_bp.route("/widgets", methods=["GET", "POST"])
+@login_required
+def handle_widgets():
+    partner = User.query.get(current_user.partner_id) if current_user.partner_id else None
+
+    if request.method == "POST":
+        data = request.get_json()
+        if "lat" in data:
+            current_user.lat, current_user.lng = data["lat"], data["lng"]
+        if data.get("action") == "miss_you":
+            current_user.miss_you_count += 1
+        if data.get("action") == "set_date" and data.get("date"):
+            date_obj = datetime.strptime(data["date"], "%Y-%m-%d")
+            current_user.meetup_date = date_obj
+            if partner:
+                partner.meetup_date = date_obj
+        db.session.commit()
+        return jsonify({"status": "updated"})
+
+    distance = (
+        haversine(current_user.lat, current_user.lng, partner.lat, partner.lng) if partner else 0
+    )
+    days_left = None
+    if current_user.meetup_date:
+        delta = (current_user.meetup_date - datetime.utcnow()).days
+        days_left = delta if delta >= 0 else None
+
+    return jsonify(
+        {
+            "distance_km": distance,
+            "my_pings": current_user.miss_you_count,
+            "partner_pings": partner.miss_you_count if partner else 0,
+            "days_left": days_left,
+        }
+    )
+
+
+@api_bp.route("/posts/feed", methods=["GET"])
+@login_required
+def get_main_feed():
+    if not current_user.partner_id:
+        return jsonify([])
+    time_threshold = datetime.utcnow() - timedelta(hours=24)
+    posts = (
+        Post.query.filter(
+            Post.parent_id.is_(None),  # ONLY GET MAIN POSTS (Replies are bundled inside)
+            Post.sender_id.in_([current_user.id, current_user.partner_id]),
+            db.or_(
+                Post.is_secret == False,
+                db.and_(
+                    Post.is_secret == True,
+                    Post.sender_id == current_user.id,
+                    Post.created_at >= time_threshold,
+                ),
+            ),
+        )
+        .order_by(Post.created_at.desc())
+        .all()
+    )
+    return jsonify([serialize_post(p) for p in posts])
+
+
+@api_bp.route("/posts/vault/count", methods=["GET"])
+@login_required
+def get_vault_count():
+    if not current_user.partner_id:
+        return jsonify({"count": 0})
+    time_threshold = datetime.utcnow() - timedelta(hours=24)
+    # Count ALL unread secret items (posts + replies)
+    count = Post.query.filter(
+        Post.sender_id == current_user.partner_id,
+        Post.is_secret == True,
+        Post.is_read == False,
+        Post.created_at >= time_threshold,
+    ).count()
+    return jsonify({"count": count})
+
+
+@api_bp.route("/posts/vault", methods=["GET"])
+@login_required
+def open_vault():
+    if not current_user.partner_id:
+        return jsonify([])
+    time_threshold = datetime.utcnow() - timedelta(hours=24)
+
+    # Get Top-Level Secrets only
+    secrets = (
+        Post.query.filter(
+            Post.parent_id.is_(None),
+            Post.sender_id == current_user.partner_id,
+            Post.is_secret == True,
+            Post.created_at >= time_threshold,
+        )
+        .order_by(Post.created_at.desc())
+        .all()
+    )
+
+    # Mark ALL partner secrets (including replies) as read since vault is open
+    all_unread = Post.query.filter(
+        Post.sender_id == current_user.partner_id, Post.is_secret == True, Post.is_read == False
+    ).all()
+    for s in all_unread:
+        s.is_read = True
+    db.session.commit()
+
+    return jsonify([serialize_post(s) for s in secrets])
+
+
+@api_bp.route("/posts", methods=["POST"])
+@login_required
+def create_post():
+    data = request.get_json()
+    parent_id = data.get("parent_id")
+    is_secret = data.get("is_secret", False)
+
+    # If replying to a secret, force the reply to also be a secret
+    if parent_id:
+        parent = Post.query.get(parent_id)
+        if parent and parent.is_secret:
+            is_secret = True
+
+    post = Post(
+        sender_id=current_user.id,
+        text_content=data.get("text_content"),
+        media_data=data.get("media_data"),
+        media_type=data.get("media_type"),
+        is_secret=is_secret,
+        parent_id=parent_id,
+    )
+    db.session.add(post)
+    db.session.commit()
+    return jsonify({"status": "success"})
+
+
+@api_bp.route("/posts/<int:post_id>", methods=["PUT", "DELETE"])
+@login_required
+def modify_post(post_id):
+    post = Post.query.get_or_404(post_id)
+    if post.sender_id != current_user.id:
+        return jsonify({"error": "Unauthorized"}), 403
+    if request.method == "DELETE":
+        db.session.delete(post)
+        db.session.commit()
+        return jsonify({"status": "deleted"})
+    if request.method == "PUT":
+        post.text_content = request.get_json().get("text_content")
+        db.session.commit()
+        return jsonify({"status": "updated"})
+
+
+@api_bp.route("/posts/<int:post_id>/react", methods=["POST"])
+@login_required
+def toggle_reaction(post_id):
+    emoji = request.get_json().get("emoji")
+    existing = Reaction.query.filter_by(
+        post_id=post_id, user_id=current_user.id, emoji=emoji
+    ).first()
+    if existing:
+        db.session.delete(existing)
+    else:
+        db.session.add(Reaction(post_id=post_id, user_id=current_user.id, emoji=emoji))
+    db.session.commit()
+    return jsonify({"status": "success"})

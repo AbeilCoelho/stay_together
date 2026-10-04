@@ -1,0 +1,586 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="w-full max-w-md mx-auto space-y-6 pb-20">
+    
+    <!-- Top Header -->
+    <div class="flex justify-between items-center bg-white p-4 rounded-2xl shadow-sm border border-gray-200 sticky top-4 z-10">
+        <h2 class="text-xl font-bold text-gray-800">Us ✈️</h2>
+        <a href="/logout" class="text-sm font-semibold text-gray-500 hover:text-brand-600 transition">Logout</a>
+    </div>
+
+    {% if not current_user.partner_id %}
+        <!-- Pairing UI -->
+        <div class="bg-white p-6 rounded-3xl shadow-lg border border-gray-200 text-center">
+            <h3 class="text-xl font-bold text-gray-800 mb-2">Pair Accounts</h3>
+            <div class="bg-gray-50 border border-gray-200 rounded-xl py-3 px-4 mb-4">
+                <span class="text-3xl font-mono font-bold tracking-widest text-brand-600">
+                    {{ current_user.pairing_code if current_user.pairing_code else "---" }}
+                </span>
+            </div>
+            {% if not current_user.pairing_code %}
+                <form action="/pair" method="POST" class="mb-4">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <button type="submit" class="w-full py-2 bg-gray-900 text-white rounded-xl font-semibold">Generate Code</button>
+                </form>
+            {% endif %}
+            <form action="/pair" method="POST" class="space-y-4">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <input type="text" name="pairing_code" placeholder="Enter partner's code" required class="w-full px-4 py-3 rounded-xl bg-gray-50 border border-gray-200 outline-none text-center font-mono text-lg uppercase tracking-widest">
+                <button type="submit" class="w-full py-3 bg-brand-500 text-white font-bold rounded-xl shadow-md shadow-brand-500/30">Pair</button>
+            </form>
+        </div>
+    {% else %}
+        
+        <!-- WIDGET GRID (Fixed High-Contrast Design) -->
+        <div class="grid grid-cols-2 gap-4">
+            
+            <!-- Distance & Location Sync -->
+            <div class="bg-white p-4 rounded-3xl shadow-md border border-gray-200 text-center flex flex-col justify-center relative">
+                <button onclick="syncLocation()" class="absolute top-3 right-3 text-gray-500 hover:text-brand-500 transition text-sm flex items-center gap-1 bg-gray-100 px-2 py-1 rounded-full" title="Sync Location">
+                    <span id="loc-icon">📍</span>
+                </button>
+                <span class="text-2xl mb-1">🌍</span>
+                <span id="widget-distance" class="text-xl font-bold text-gray-900">0 km</span>
+                <span class="text-xs text-gray-500 font-bold uppercase tracking-wider">Apart</span>
+            </div>
+
+            <!-- Meetup Countdown Widget (Solid Gradient, Bold Text) -->
+            <div onclick="setMeetupDate()" class="bg-gradient-to-br from-purple-500 to-brand-500 p-4 rounded-3xl shadow-md text-center flex flex-col justify-center cursor-pointer text-white transform transition active:scale-95">
+                <span class="text-2xl mb-1">🗓️</span>
+                <span class="text-xs font-bold uppercase tracking-widest text-white mb-1">Meetup In</span>
+                <span id="days-left" class="text-3xl font-black text-white">Set</span>
+                <span class="text-xs font-medium text-purple-100 mt-1">Tap to set date</span>
+            </div>
+
+            <!-- Miss You Ping (Solid White with bold pink border) -->
+            <div onclick="pingMissYou()" class="col-span-2 bg-white p-4 rounded-3xl shadow-md border-2 border-brand-300 text-center flex flex-col justify-center cursor-pointer transform transition active:scale-95">
+                <span class="text-2xl mb-1">🥺</span>
+                <span class="text-lg font-black text-brand-600 mb-1">Miss You!</span>
+                <div class="flex justify-center items-center gap-4 text-sm font-bold text-gray-700">
+                    <span>Me: <span id="my-pings" class="text-brand-500 text-lg">0</span></span>
+                    <span class="text-gray-300">|</span>
+                    <span>Them: <span id="partner-pings" class="text-brand-500 text-lg">0</span></span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Secret Vault Button (Solid Dark) -->
+        <div class="bg-gray-900 p-4 rounded-3xl shadow-xl text-white text-center transform transition active:scale-95 cursor-pointer flex justify-between items-center" onclick="openVault()">
+            <div class="flex items-center gap-3">
+                <span class="text-3xl">🤫</span>
+                <div class="text-left">
+                    <h3 class="font-bold text-lg leading-tight text-white">Partner's Secrets</h3>
+                    <p class="text-gray-300 text-xs font-medium">Tap to unlock safely</p>
+                </div>
+            </div>
+            <div class="bg-brand-500 text-white w-10 h-10 flex items-center justify-center rounded-full font-bold shadow-md" id="secret-count">0</div>
+        </div>
+
+        <!-- Main Composer -->
+        <div class="bg-white p-4 rounded-3xl shadow-md border border-gray-200" id="composer-box">
+            
+            <!-- Reply Banner -->
+            <div id="replying-to-banner" class="hidden mb-3 text-sm font-bold text-brand-700 bg-brand-50 border border-brand-200 p-3 rounded-xl flex justify-between items-center">
+                <span>Replying to post...</span>
+                <button onclick="cancelReply()" class="text-gray-500 hover:text-red-500 font-bold px-2 py-1 bg-white rounded-md shadow-sm">✕</button>
+            </div>
+
+            <!-- Image/Doodle Preview -->
+            <div id="mediaPreviewContainer" class="hidden mb-3 relative">
+                <img id="mediaPreview" src="" class="w-full rounded-xl max-h-64 object-cover border border-gray-200">
+                <button onclick="removeMedia()" class="absolute top-2 right-2 bg-gray-900 text-white rounded-full w-8 h-8 flex items-center justify-center shadow-lg">✕</button>
+            </div>
+
+            <!-- Text Area -->
+            <textarea id="postMsg" rows="2" placeholder="Share a message or caption..." class="w-full px-4 py-3 rounded-xl bg-gray-50 border border-gray-200 outline-none resize-none mb-3 text-gray-800"></textarea>
+            
+            <div class="flex items-center justify-between mb-3 border-b border-gray-100 pb-3">
+                <div class="flex items-center gap-2">
+                    <span id="labelNormal" class="text-sm font-bold text-brand-500">Normal</span>
+                    <label class="relative cursor-pointer">
+                        <input type="checkbox" id="isSecretToggle" class="sr-only">
+                        <div class="block bg-brand-100 w-12 h-6 rounded-full transition-colors" id="toggleBg"></div>
+                        <div class="dot absolute left-1 top-1 bg-brand-500 w-4 h-4 rounded-full transition transform" id="toggleDot"></div>
+                    </label>
+                    <span id="labelSecret" class="text-sm font-medium text-gray-400">Secret</span>
+                </div>
+                <button onclick="submitPost()" class="py-2 px-6 bg-brand-500 text-white font-bold rounded-full hover:bg-brand-600 transition shadow-md">Post</button>
+            </div>
+
+            <div class="flex gap-2">
+                <label class="cursor-pointer bg-gray-100 hover:bg-gray-200 border border-gray-200 px-4 py-2 rounded-xl text-sm font-bold text-gray-700 flex items-center gap-2 transition w-1/2 justify-center">
+                    🖼️ Photo
+                    <input type="file" id="imageInput" accept="image/*" class="hidden" onchange="handleImage(event)">
+                </label>
+                <button onclick="openDoodle()" class="bg-gray-100 hover:bg-gray-200 border border-gray-200 px-4 py-2 rounded-xl text-sm font-bold text-gray-700 flex items-center gap-2 transition w-1/2 justify-center">
+                    ✍️ Doodle
+                </button>
+            </div>
+        </div>
+
+        <!-- Main Feed -->
+        <div class="space-y-4" id="mainFeed"></div>
+    {% endif %}
+</div>
+
+<!-- SECRET VAULT MODAL (Solid Background) -->
+<div id="vaultModal" class="fixed inset-0 bg-gray-900 z-50 hidden flex-col pb-10 overflow-y-auto">
+    <div class="sticky top-0 bg-gray-900 p-4 flex justify-between items-center border-b border-gray-700 z-20 shadow-md">
+        <h2 class="text-2xl font-bold text-white flex items-center gap-2">🤫 Partner's Secrets</h2>
+        <button onclick="closeVault()" class="text-gray-400 hover:text-white text-3xl font-bold">&times;</button>
+    </div>
+    <div id="vaultFeed" class="p-4 space-y-6 max-w-md mx-auto w-full"></div>
+</div>
+
+<!-- DOODLE PAD MODAL -->
+<div id="doodleModal" class="fixed inset-0 bg-white z-50 hidden flex-col">
+    <div class="flex justify-between items-center p-4 border-b border-gray-200 shadow-sm">
+        <button onclick="closeDoodle()" class="text-gray-500 font-bold px-4 py-2 bg-gray-100 rounded-lg">Cancel</button>
+        <h3 class="font-bold text-lg text-gray-800">Draw Note</h3>
+        <button onclick="saveDoodle()" class="text-white font-bold px-4 py-2 bg-brand-500 rounded-lg shadow-md">Done</button>
+    </div>
+    <canvas id="doodlePad" class="flex-grow bg-white touch-none cursor-crosshair"></canvas>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    const csrfToken = document.querySelector('meta[name="csrf-token"]').getAttribute('content');
+    let base64Media = null;
+    let mediaType = null;
+    let replyingToId = null;
+
+    // ==========================================
+    // 1. WIDGETS & LOCATION API
+    // ==========================================
+    
+    function syncLocation() {
+        if (!navigator.geolocation) {
+            return alert("Location not supported by this browser.");
+        }
+        
+        const icon = document.getElementById('loc-icon');
+        icon.innerText = "⏳";
+        
+        navigator.geolocation.getCurrentPosition(async (pos) => {
+            try {
+                await fetch('/api/widgets', { 
+                    method: 'POST', 
+                    headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken }, 
+                    body: JSON.stringify({ lat: pos.coords.latitude, lng: pos.coords.longitude }) 
+                });
+                icon.innerText = "📍"; 
+                refreshWidgets();
+            } catch (err) {
+                console.error("Location sync failed", err);
+                icon.innerText = "📍";
+            }
+        }, (err) => { 
+            alert("Location permission denied or HTTPS required."); 
+            icon.innerText = "📍"; 
+        });
+    }
+
+    async function pingMissYou() { 
+        await fetch('/api/widgets', { 
+            method: 'POST', 
+            headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken }, 
+            body: JSON.stringify({ action: 'miss_you' }) 
+        }); 
+        refreshWidgets(); 
+    }
+
+    async function setMeetupDate() {
+        const d = prompt("Enter Target Date (Format: YYYY-MM-DD):");
+        if(d) { 
+            await fetch('/api/widgets', { 
+                method: 'POST', 
+                headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken }, 
+                body: JSON.stringify({ action: 'set_date', date: d }) 
+            }); 
+            refreshWidgets(); 
+        }
+    }
+    
+    async function refreshWidgets() {
+        if(!document.getElementById('widget-distance')) return;
+        
+        const res = await fetch('/api/widgets');
+        const data = await res.json();
+        
+        document.getElementById('widget-distance').innerText = data.distance_km + " km";
+        document.getElementById('my-pings').innerText = data.my_pings;
+        document.getElementById('partner-pings').innerText = data.partner_pings;
+        document.getElementById('days-left').innerText = data.days_left !== null ? `${data.days_left}d` : 'Set';
+    }
+
+    // ==========================================
+    // 2. UI TOGGLES & MEDIA HANDLING
+    // ==========================================
+    
+    const toggle = document.getElementById('isSecretToggle');
+    if(toggle) {
+        toggle.addEventListener('change', (e) => {
+            const bg = document.getElementById('toggleBg');
+            const dot = document.getElementById('toggleDot');
+            const lNorm = document.getElementById('labelNormal');
+            const lSec = document.getElementById('labelSecret');
+            
+            if(e.target.checked) { 
+                bg.classList.replace('bg-brand-100', 'bg-gray-900'); 
+                dot.classList.replace('bg-brand-500', 'bg-white'); 
+                dot.classList.add('translate-x-6'); 
+                lNorm.className = "text-sm font-medium text-gray-400"; 
+                lSec.className = "text-sm font-bold text-gray-900"; 
+            } else { 
+                bg.classList.replace('bg-gray-900', 'bg-brand-100'); 
+                dot.classList.replace('bg-white', 'bg-brand-500'); 
+                dot.classList.remove('translate-x-6'); 
+                lNorm.className = "text-sm font-bold text-brand-500"; 
+                lSec.className = "text-sm font-medium text-gray-400"; 
+            }
+        });
+    }
+
+    function handleImage(event) {
+        const file = event.target.files[0]; 
+        if(!file) return;
+        
+        const reader = new FileReader();
+        reader.onload = function(e) {
+            const img = new Image();
+            img.onload = function() {
+                const isSecret = document.getElementById('isSecretToggle').checked;
+                const canvas = document.createElement('canvas');
+                
+                // High Quality for Secrets (1600px), standard for normal (800px)
+                const MAX_WIDTH = isSecret ? 1600 : 800; 
+                let width = img.width, height = img.height;
+                
+                if (width > MAX_WIDTH) { 
+                    height = height * (MAX_WIDTH / width); 
+                    width = MAX_WIDTH; 
+                }
+                
+                canvas.width = width; 
+                canvas.height = height; 
+                canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+                
+                base64Media = canvas.toDataURL('image/jpeg', isSecret ? 0.9 : 0.8); 
+                mediaType = 'image';
+                
+                document.getElementById('mediaPreview').src = base64Media; 
+                document.getElementById('mediaPreviewContainer').classList.remove('hidden');
+            }; 
+            img.src = e.target.result;
+        }; 
+        reader.readAsDataURL(file);
+    }
+
+    function removeMedia() { 
+        base64Media = null; 
+        mediaType = null; 
+        document.getElementById('imageInput').value = ''; 
+        document.getElementById('mediaPreviewContainer').classList.add('hidden'); 
+    }
+    
+    // ==========================================
+    // 3. DOODLE CANVAS LOGIC
+    // ==========================================
+    
+    const canvas = document.getElementById('doodlePad'); 
+    let ctx, drawing = false;
+    
+    if(canvas) {
+        ctx = canvas.getContext('2d'); 
+        
+        const startDraw = (e) => { drawing = true; draw(e); e.preventDefault(); }; 
+        const endDraw = () => { drawing = false; ctx.beginPath(); };
+        
+        const draw = (e) => { 
+            if(!drawing) return; 
+            e.preventDefault();
+            const rect = canvas.getBoundingClientRect(); 
+            const x = (e.touches ? e.touches[0].clientX : e.clientX) - rect.left; 
+            const y = (e.touches ? e.touches[0].clientY : e.clientY) - rect.top; 
+            
+            ctx.lineWidth = 5; 
+            ctx.lineCap = 'round'; 
+            ctx.strokeStyle = '#ec4899'; // Brand Pink
+            
+            ctx.lineTo(x, y); 
+            ctx.stroke(); 
+            ctx.beginPath(); 
+            ctx.moveTo(x, y); 
+        };
+        
+        canvas.addEventListener('mousedown', startDraw); 
+        canvas.addEventListener('mouseup', endDraw); 
+        canvas.addEventListener('mousemove', draw); 
+        canvas.addEventListener('touchstart', startDraw, {passive: false}); 
+        canvas.addEventListener('touchend', endDraw); 
+        canvas.addEventListener('touchmove', draw, {passive: false});
+    }
+
+    function openDoodle() { 
+        document.getElementById('doodleModal').classList.remove('hidden'); 
+        document.getElementById('doodleModal').classList.add('flex'); 
+        canvas.width = window.innerWidth; 
+        canvas.height = window.innerHeight - 60; 
+        ctx.fillStyle = "white"; 
+        ctx.fillRect(0, 0, canvas.width, canvas.height); 
+    }
+
+    function closeDoodle() { 
+        document.getElementById('doodleModal').classList.add('hidden'); 
+        document.getElementById('doodleModal').classList.remove('flex'); 
+    }
+
+    function saveDoodle() { 
+        base64Media = canvas.toDataURL('image/png'); 
+        mediaType = 'doodle'; 
+        document.getElementById('mediaPreview').src = base64Media; 
+        document.getElementById('mediaPreviewContainer').classList.remove('hidden'); 
+        closeDoodle(); 
+    }
+
+    // ==========================================
+    // 4. POSTING, REPLIES, & HTML RENDERING
+    // ==========================================
+
+    function startReply(id) { 
+        replyingToId = id; 
+        document.getElementById('replying-to-banner').classList.remove('hidden'); 
+        document.getElementById('composer-box').scrollIntoView({behavior: 'smooth'}); 
+        document.getElementById('postMsg').focus(); 
+    }
+    
+    function cancelReply() { 
+        replyingToId = null; 
+        document.getElementById('replying-to-banner').classList.add('hidden'); 
+    }
+
+    async function submitPost() {
+        const textContent = document.getElementById('postMsg').value.trim();
+        const isSecret = document.getElementById('isSecretToggle').checked;
+        
+        if(!textContent && !base64Media) return;
+
+        await fetch('/api/posts', {
+            method: 'POST', 
+            headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken },
+            body: JSON.stringify({ 
+                is_secret: isSecret, 
+                text_content: textContent, 
+                media_data: base64Media, 
+                media_type: mediaType, 
+                parent_id: replyingToId 
+            })
+        });
+        
+        document.getElementById('postMsg').value = ''; 
+        removeMedia(); 
+        cancelReply(); 
+        refreshAll();
+    }
+
+    function toggleReplyBox(id) {
+        document.getElementById(`reply-box-${id}`).classList.toggle('hidden');
+        document.getElementById(`reply-input-${id}`).focus();
+    }
+
+    async function submitInlineReply(parentId, isSecret) {
+        const input = document.getElementById(`reply-input-${parentId}`);
+        const textContent = input.value.trim();
+        if(!textContent) return;
+
+        await fetch('/api/posts', {
+            method: 'POST', 
+            headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken },
+            body: JSON.stringify({ 
+                is_secret: isSecret, 
+                text_content: textContent, 
+                parent_id: parentId 
+            })
+        });
+        input.value = ''; 
+        refreshAll();
+    }
+
+    function unblur(el) { 
+        el.classList.remove('blur-xl', 'cursor-pointer'); 
+        el.nextElementSibling?.classList.add('hidden'); // Hide the "Tap to Reveal" text
+    }
+    
+    function calculateTimeLeft(isoString) { 
+        const diff = new Date(isoString).getTime() + (24*60*60*1000) - new Date().getTime(); 
+        return diff <= 0 ? "Expired" : `${Math.floor(diff / 3600000)}h left`; 
+    }
+
+    async function toggleReact(postId, emoji) {
+        await fetch(`/api/posts/${postId}/react`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken },
+            body: JSON.stringify({ emoji })
+        });
+        refreshAll();
+    }
+
+    function generatePostHTML(post, isVaultMode = false) {
+        const isMySecret = post.is_secret && post.is_mine;
+        const isDark = isVaultMode || isMySecret;
+        const bg = isDark ? 'bg-gray-800 border-gray-700 text-gray-100' : 'bg-white border-gray-200 text-gray-800';
+
+        // NSFW Blur wrapper if it's a secret
+        const blurClass = post.is_secret ? 'blur-xl transition duration-500 cursor-pointer' : '';
+        const blurOverlay = post.is_secret ? `<div class="absolute inset-0 flex items-center justify-center pointer-events-none text-white font-black drop-shadow-md text-xl z-10" onclick="this.previousElementSibling.click()">Tap to Reveal 🤫</div>` : '';
+
+        // Media + Text Layout
+        let mediaHtml = post.media_data ? `<img src="${post.media_data}" class="w-full rounded-xl mt-2 max-h-96 object-contain bg-black/5" loading="lazy">` : '';
+        let textHtml = post.text_content ? `<p class="mt-2 text-lg whitespace-pre-wrap ${post.media_data ? 'pt-2' : ''}">${post.text_content}</p>` : '';
+        let contentWrap = `<div class="relative overflow-hidden rounded-xl mt-2"><div class="${blurClass}" onclick="unblur(this)">${mediaHtml} ${textHtml}</div>${blurOverlay}</div>`;
+
+        // Facebook-Style Nested Replies
+        let repliesHtml = '';
+        if (post.replies && post.replies.length > 0) {
+            repliesHtml = `<div class="mt-3 space-y-2">`;
+            post.replies.forEach(reply => {
+                const rBg = isDark ? 'bg-gray-700 border-gray-600' : 'bg-gray-50 border-gray-100';
+                repliesHtml += `
+                    <div class="ml-6 p-3 rounded-2xl border ${rBg} text-sm relative">
+                        <div class="flex justify-between items-start mb-1">
+                            <span class="font-bold ${isDark ? 'text-gray-200' : 'text-gray-800'}">${reply.sender}</span>
+                            <span class="text-xs ${isDark ? 'text-gray-400' : 'text-gray-500'}">${reply.time}</span>
+                        </div>
+                        ${reply.text_content ? `<p class="${isDark ? 'text-gray-300' : 'text-gray-700'}">${reply.text_content}</p>` : ''}
+                        ${reply.is_mine ? `<button onclick="deletePost(${reply.id})" class="text-red-400 text-xs absolute top-3 right-3 hover:underline font-bold">✕</button>` : ''}
+                    </div>
+                `;
+            });
+            repliesHtml += `</div>`;
+        }
+
+        // Inline Reply Box (Hidden by default)
+        let replyBoxHtml = `
+            <div id="reply-box-${post.id}" class="hidden mt-3 pt-3 border-t ${isDark ? 'border-gray-700' : 'border-gray-100'} flex gap-2">
+                <input type="text" id="reply-input-${post.id}" placeholder="Write a reply..." class="flex-grow px-3 py-2 rounded-xl text-sm ${isDark ? 'bg-gray-700 text-white border-gray-600' : 'bg-gray-50 border-gray-200 text-gray-800'} outline-none focus:ring-1 focus:ring-brand-500 border">
+                <button onclick="submitInlineReply(${post.id}, ${post.is_secret})" class="px-4 py-2 bg-brand-500 text-white rounded-xl text-sm font-bold hover:bg-brand-600 transition shadow-sm">Send</button>
+            </div>
+        `;
+
+        // Badges & Actions
+        let badge = isMySecret ? `<div class="text-xs bg-red-500/20 text-red-400 px-2 py-1 rounded-full flex gap-1 items-center font-bold">🤫 My Secret <span class="border-l border-red-500/30 pl-1 ml-1">⏱ ${calculateTimeLeft(post.time_iso)}</span></div>` : `<span class="text-xs font-medium text-gray-400">${post.time}</span>`;
+
+        let actionHtml = `
+            <div class="mt-2 flex justify-between items-center text-sm pt-2">
+                <button onclick="toggleReplyBox(${post.id})" class="text-gray-500 hover:text-brand-500 flex items-center gap-1 font-bold transition">↩️ Reply</button>
+                ${post.is_mine ? `
+                    <div class="flex gap-4">
+                        ${post.text_content ? `<button onclick="editPost(${post.id})" class="text-blue-500 font-bold hover:underline">Edit</button>` : ''}
+                        <button onclick="deletePost(${post.id})" class="text-red-500 font-bold hover:underline">Delete</button>
+                    </div>
+                ` : ''}
+            </div>`;
+
+        // Reactions
+        let reactList = '';
+        for (const [emoji, data] of Object.entries(post.reactions)) {
+            const btnClass = data.reacted_by_me ? 'bg-brand-100 border-brand-500 text-brand-700' : (isDark ? 'bg-gray-700 border-gray-600 text-white' : 'bg-gray-50 border-gray-200 text-gray-800');
+            reactList += `<button onclick="toggleReact(${post.id}, '${emoji}')" class="px-2 py-1 rounded-full border text-sm flex items-center gap-1 ${btnClass}">${emoji} <span class="font-bold">${data.count}</span></button>`;
+        }
+        let pickerHtml = `<div class="flex gap-3 mt-3 pt-3 border-t ${isDark ? 'border-gray-700' : 'border-gray-100'} overflow-x-auto no-scrollbar">${reactList}<button onclick="toggleReact(${post.id}, '❤️')" class="hover:scale-125 transition text-xl">❤️</button><button onclick="toggleReact(${post.id}, '🔥')" class="hover:scale-125 transition text-xl">🔥</button><button onclick="toggleReact(${post.id}, '🥺')" class="hover:scale-125 transition text-xl">🥺</button><button onclick="toggleReact(${post.id}, '😂')" class="hover:scale-125 transition text-xl">😂</button></div>`;
+
+        return `
+            <div class="p-4 rounded-3xl shadow-md border ${bg} mb-4 transform transition hover:-translate-y-0.5">
+                <div class="flex justify-between items-start mb-2"><span class="font-black text-lg">${post.sender}</span>${badge}</div>
+                ${contentWrap}
+                ${pickerHtml}
+                ${repliesHtml}
+                ${replyBoxHtml}
+                ${actionHtml}
+            </div>
+        `;
+    }
+
+    // ==========================================
+    // 5. POST MODIFICATION & FETCHING
+    // ==========================================
+
+    async function deletePost(id) { 
+        if(confirm("Delete this post forever?")) { 
+            await fetch(`/api/posts/${id}`, { method: 'DELETE', headers: { 'X-CSRFToken': csrfToken } }); 
+            refreshAll(); 
+        } 
+    }
+    
+    async function editPost(id) { 
+        const newText = prompt("Edit your text:"); 
+        if(newText) { 
+            await fetch(`/api/posts/${id}`, { 
+                method: 'PUT', 
+                headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken }, 
+                body: JSON.stringify({ text_content: newText }) 
+            }); 
+            refreshAll(); 
+        } 
+    }
+
+    async function loadFeed() { 
+        if(!document.getElementById('mainFeed')) return; 
+        const res = await fetch('/api/posts/feed'); 
+        const posts = await res.json(); 
+        document.getElementById('mainFeed').innerHTML = posts.length ? posts.map(p => generatePostHTML(p, false)).join('') : '<p class="text-center font-bold text-gray-400 py-10">No posts yet. Start sharing!</p>'; 
+    }
+    
+    async function refreshVaultCount() { 
+        if(!document.getElementById('secret-count')) return; 
+        const res = await fetch('/api/posts/vault/count');
+        const data = await res.json();
+        const badge = document.getElementById('secret-count');
+        badge.innerText = data.count; 
+        
+        // Pulse animation if there are unread secrets
+        const vault = document.getElementById('secret-count').parentElement;
+        if(data.count > 0) {
+            vault.classList.add('animate-pulse');
+        } else {
+            vault.classList.remove('animate-pulse');
+        }
+    }
+    
+    async function openVault() { 
+        document.getElementById('vaultModal').classList.remove('hidden'); 
+        document.getElementById('vaultModal').classList.add('flex'); 
+        
+        const res = await fetch('/api/posts/vault');
+        const secrets = await res.json(); 
+        
+        document.getElementById('vaultFeed').innerHTML = secrets.length ? secrets.map(p => generatePostHTML(p, true)).join('') : '<p class="text-center font-bold text-gray-500 mt-10">Vault is empty.</p>'; 
+        refreshVaultCount(); 
+    }
+    
+    function closeVault() { 
+        document.getElementById('vaultModal').classList.add('hidden'); 
+        document.getElementById('vaultModal').classList.remove('flex'); 
+        refreshVaultCount(); 
+    }
+    
+    function refreshAll() { 
+        loadFeed(); 
+        refreshVaultCount(); 
+        refreshWidgets(); 
+        
+        // Also refresh the vault modal if it is currently open
+        if(!document.getElementById('vaultModal').classList.contains('hidden')) {
+            openVault();
+        }
+    }
+
+    // Auto-refresh loops
+    if(document.getElementById('mainFeed')) { 
+        refreshAll(); 
+        setInterval(refreshAll, 10000); 
+    }
+</script>
+{% endblock %}

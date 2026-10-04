@@ -1,0 +1,33 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Python environments & build artifacts
+*.venv/
+.venv/
+venv/
+ENV/
+env/
+build/
+dist/
+*.egg-info/
+
+# IDE & Editor configurations
+.vscode/
+.vscode/*
+.idea/
+*.swp
+*.swo
+
+# Environment variables & secrets
+.env
+.env.*
+!.env.example
+
+# Package configuration (as requested)
+pyproject.toml
+
+# System & OS generated files
+.DS_Store
+Thumbs.db
