@@ -1,6 +1,7 @@
 import os
 
 from flask import Flask
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 from .config import Config
 from .extensions import csrf, db, limiter, login_manager, talisman
@@ -11,6 +12,10 @@ def create_app():
     app = Flask(__name__)
     app.config.from_object(Config)
 
+    # 🚨 CRITICAL FIX FOR RENDER:
+    # Tells Flask it is behind a secure proxy so it handles cookies & HTTPS correctly
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
+
     # Init extensions
     db.init_app(app)
     login_manager.init_app(app)
@@ -18,20 +23,22 @@ def create_app():
     csrf.init_app(app)
     limiter.init_app(app)
 
-    # Check if we are in production
+    # Disable HTTPS forcing for local development
     is_prod = os.environ.get("FLASK_ENV") == "production"
 
-    # Configure Talisman (Security Headers)
     talisman.init_app(
         app,
         force_https=is_prod,
-        session_cookie_secure=is_prod,  # <--- THIS FIXES THE CSRF ERROR LOCALLY
+        session_cookie_secure=is_prod,
         content_security_policy={
             "default-src": ["'self'"],
             "style-src": ["'self'", "'unsafe-inline'"],
             "script-src": ["'self'", "'unsafe-inline'", "https://cdn.tailwindcss.com"],
-            "img-src": ["'self'", "data:"],
+            "img-src": ["'self'", "data:", "blob:"],  # Added blob: just in case
         },
+        # 🚨 CRITICAL FIX FOR UI:
+        # Prevents Talisman from overriding our 'unsafe-inline' script rule
+        content_security_policy_nonce_in=[],
     )
 
     @login_manager.user_loader
