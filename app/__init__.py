@@ -18,16 +18,19 @@ def create_app():
     csrf.init_app(app)
     limiter.init_app(app)
 
-    # Disable HTTPS forcing for local development
+    # Check if we are in production
     is_prod = os.environ.get("FLASK_ENV") == "production"
+
+    # Configure Talisman (Security Headers)
     talisman.init_app(
         app,
         force_https=is_prod,
+        session_cookie_secure=is_prod,  # <--- THIS FIXES THE CSRF ERROR LOCALLY
         content_security_policy={
             "default-src": ["'self'"],
             "style-src": ["'self'", "'unsafe-inline'"],
             "script-src": ["'self'", "'unsafe-inline'", "https://cdn.tailwindcss.com"],
-            "img-src": ["'self'", "data:"],  # <--- Added "data:" to allow Base64 pictures
+            "img-src": ["'self'", "data:"],
         },
     )
 

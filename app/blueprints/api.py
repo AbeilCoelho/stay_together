@@ -1,14 +1,73 @@
 from datetime import datetime, timedelta
+import json
 import math
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, current_app, jsonify, request
 from flask_login import current_user, login_required
+from pywebpush import WebPushException, webpush
 
-from ..models import Post, Reaction, User, db
+from ..models import Post, PushSubscription, Reaction, User, db
 
 api_bp = Blueprint("api", __name__)
 
 
+# --- NOTIFICATION HELPER ---
+def send_push_to_partner(title, body):
+    if not current_user.partner_id:
+        return
+    subs = PushSubscription.query.filter_by(user_id=current_user.partner_id).all()
+    for sub in subs:
+        try:
+            webpush(
+                subscription_info={
+                    "endpoint": sub.endpoint,
+                    "keys": {"auth": sub.keys_auth, "p256dh": sub.keys_p256dh},
+                },
+                data=json.dumps({"title": title, "body": body}),
+                vapid_private_key=current_app.config["VAPID_PRIVATE_KEY"],
+                vapid_claims={"sub": "mailto:admin@example.com"},
+            )
+        except WebPushException:
+            db.session.delete(sub)  # Remove expired subscriptions
+    db.session.commit()
+
+
+# --- NEW ROUTE: SETTINGS ---
+@api_bp.route("/settings", methods=["POST"])
+@login_required
+def update_settings():
+    data = request.get_json()
+    if data.get("username"):
+        existing = User.query.filter_by(username=data["username"]).first()
+        if existing and existing.id != current_user.id:
+            return jsonify({"error": "Username taken"}), 400
+        current_user.username = data["username"]
+    if data.get("password"):
+        current_user.set_password(data["password"])
+    db.session.commit()
+    return jsonify({"status": "success"})
+
+
+# --- NEW ROUTE: PUSH SUBSCRIPTION ---
+@api_bp.route("/subscribe", methods=["POST"])
+@login_required
+def subscribe():
+    data = request.get_json()
+    endpoint = data.get("endpoint")
+    keys = data.get("keys", {})
+    if not PushSubscription.query.filter_by(endpoint=endpoint).first():
+        sub = PushSubscription(
+            user_id=current_user.id,
+            endpoint=endpoint,
+            keys_auth=keys.get("auth"),
+            keys_p256dh=keys.get("p256dh"),
+        )
+        db.session.add(sub)
+        db.session.commit()
+    return jsonify({"status": "success"})
+
+
+# ... (Keep all existing routes like serialize_post, handle_widgets, get_main_feed exactly the same) ...
 def haversine(lat1, lon1, lat2, lon2):
     if None in (lat1, lon1, lat2, lon2):
         return 0
@@ -22,7 +81,6 @@ def haversine(lat1, lon1, lat2, lon2):
     return round(R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a)))
 
 
-# NEW: Serializes a post AND its nested replies (Facebook style)
 def serialize_post(p, is_reply=False):
     reaction_data = {}
     for r in p.reactions:
@@ -44,12 +102,9 @@ def serialize_post(p, is_reply=False):
         "time": p.created_at.strftime("%H:%M %b %d"),
         "reactions": reaction_data,
     }
-
-    # Only fetch replies if this is a main post (prevents infinite loops)
     if not is_reply:
         sorted_replies = sorted(p.replies, key=lambda x: x.created_at)
         data["replies"] = [serialize_post(r, is_reply=True) for r in sorted_replies]
-
     return data
 
 
@@ -57,13 +112,15 @@ def serialize_post(p, is_reply=False):
 @login_required
 def handle_widgets():
     partner = User.query.get(current_user.partner_id) if current_user.partner_id else None
-
     if request.method == "POST":
         data = request.get_json()
         if "lat" in data:
             current_user.lat, current_user.lng = data["lat"], data["lng"]
         if data.get("action") == "miss_you":
             current_user.miss_you_count += 1
+            send_push_to_partner(
+                "🥺 Miss You Ping!", f"{current_user.username} is thinking of you."
+            )  # TRIGGER PUSH!
         if data.get("action") == "set_date" and data.get("date"):
             date_obj = datetime.strptime(data["date"], "%Y-%m-%d")
             current_user.meetup_date = date_obj
@@ -71,7 +128,6 @@ def handle_widgets():
                 partner.meetup_date = date_obj
         db.session.commit()
         return jsonify({"status": "updated"})
-
     distance = (
         haversine(current_user.lat, current_user.lng, partner.lat, partner.lng) if partner else 0
     )
@@ -79,7 +135,6 @@ def handle_widgets():
     if current_user.meetup_date:
         delta = (current_user.meetup_date - datetime.utcnow()).days
         days_left = delta if delta >= 0 else None
-
     return jsonify(
         {
             "distance_km": distance,
@@ -98,7 +153,7 @@ def get_main_feed():
     time_threshold = datetime.utcnow() - timedelta(hours=24)
     posts = (
         Post.query.filter(
-            Post.parent_id.is_(None),  # ONLY GET MAIN POSTS (Replies are bundled inside)
+            Post.parent_id.is_(None),
             Post.sender_id.in_([current_user.id, current_user.partner_id]),
             db.or_(
                 Post.is_secret == False,
@@ -121,7 +176,6 @@ def get_vault_count():
     if not current_user.partner_id:
         return jsonify({"count": 0})
     time_threshold = datetime.utcnow() - timedelta(hours=24)
-    # Count ALL unread secret items (posts + replies)
     count = Post.query.filter(
         Post.sender_id == current_user.partner_id,
         Post.is_secret == True,
@@ -137,8 +191,6 @@ def open_vault():
     if not current_user.partner_id:
         return jsonify([])
     time_threshold = datetime.utcnow() - timedelta(hours=24)
-
-    # Get Top-Level Secrets only
     secrets = (
         Post.query.filter(
             Post.parent_id.is_(None),
@@ -149,15 +201,12 @@ def open_vault():
         .order_by(Post.created_at.desc())
         .all()
     )
-
-    # Mark ALL partner secrets (including replies) as read since vault is open
     all_unread = Post.query.filter(
         Post.sender_id == current_user.partner_id, Post.is_secret == True, Post.is_read == False
     ).all()
     for s in all_unread:
         s.is_read = True
     db.session.commit()
-
     return jsonify([serialize_post(s) for s in secrets])
 
 
@@ -167,8 +216,6 @@ def create_post():
     data = request.get_json()
     parent_id = data.get("parent_id")
     is_secret = data.get("is_secret", False)
-
-    # If replying to a secret, force the reply to also be a secret
     if parent_id:
         parent = Post.query.get(parent_id)
         if parent and parent.is_secret:
@@ -184,6 +231,13 @@ def create_post():
     )
     db.session.add(post)
     db.session.commit()
+
+    # TRIGGER PUSH!
+    if is_secret:
+        send_push_to_partner("🤫 New Secret", f"{current_user.username} sent you a secret!")
+    else:
+        send_push_to_partner("✨ New Post", f"{current_user.username} shared something.")
+
     return jsonify({"status": "success"})
 
 

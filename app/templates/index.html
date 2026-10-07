@@ -6,7 +6,10 @@
     <!-- Top Header -->
     <div class="flex justify-between items-center bg-white p-4 rounded-2xl shadow-sm border border-gray-200 sticky top-4 z-10">
         <h2 class="text-xl font-bold text-gray-800">Us ✈️</h2>
-        <a href="/logout" class="text-sm font-semibold text-gray-500 hover:text-brand-600 transition">Logout</a>
+        <div class="flex gap-4 items-center">
+            <button onclick="openSettings()" class="text-xl hover:scale-110 transition transform" title="Settings">⚙️</button>
+            <a href="/logout" class="text-sm font-semibold text-gray-500 hover:text-brand-600 transition">Logout</a>
+        </div>
     </div>
 
     {% if not current_user.partner_id %}
@@ -32,6 +35,12 @@
         </div>
     {% else %}
         
+        <!-- Push Notification Banner (If not subscribed) -->
+        <div id="push-banner" class="hidden bg-blue-50 border border-blue-200 p-4 rounded-3xl text-sm font-semibold text-blue-800 flex justify-between items-center shadow-sm">
+            <span>Enable notifications? 🔔</span>
+            <button onclick="subscribePush()" class="bg-blue-600 text-white px-4 py-2 rounded-full shadow hover:bg-blue-700 transition">Enable</button>
+        </div>
+
         <!-- WIDGET GRID (Fixed High-Contrast Design) -->
         <div class="grid grid-cols-2 gap-4">
             
@@ -108,13 +117,18 @@
                 <button onclick="submitPost()" class="py-2 px-6 bg-brand-500 text-white font-bold rounded-full hover:bg-brand-600 transition shadow-md">Post</button>
             </div>
 
+            <!-- SEPARATED CAMERA AND GALLERY BUTTONS -->
             <div class="flex gap-2">
-                <label class="cursor-pointer bg-gray-100 hover:bg-gray-200 border border-gray-200 px-4 py-2 rounded-xl text-sm font-bold text-gray-700 flex items-center gap-2 transition w-1/2 justify-center">
-                    🖼️ Photo
-                    <input type="file" id="imageInput" accept="image/*" class="hidden" onchange="handleImage(event)">
+                <label class="cursor-pointer bg-gray-100 hover:bg-gray-200 border border-gray-200 px-2 py-2 rounded-xl text-sm font-bold text-gray-700 flex items-center gap-1 transition flex-1 justify-center whitespace-nowrap">
+                    📸 Camera 
+                    <input type="file" accept="image/*" capture="environment" class="hidden" onchange="handleImage(event)">
                 </label>
-                <button onclick="openDoodle()" class="bg-gray-100 hover:bg-gray-200 border border-gray-200 px-4 py-2 rounded-xl text-sm font-bold text-gray-700 flex items-center gap-2 transition w-1/2 justify-center">
-                    ✍️ Doodle
+                <label class="cursor-pointer bg-gray-100 hover:bg-gray-200 border border-gray-200 px-2 py-2 rounded-xl text-sm font-bold text-gray-700 flex items-center gap-1 transition flex-1 justify-center whitespace-nowrap">
+                    🖼️ Gallery 
+                    <input type="file" accept="image/*" class="hidden" onchange="handleImage(event)">
+                </label>
+                <button onclick="openDoodle()" class="bg-gray-100 hover:bg-gray-200 border border-gray-200 px-2 py-2 rounded-xl text-sm font-bold text-gray-700 flex items-center gap-1 transition flex-1 justify-center">
+                    ✍️ Draw
                 </button>
             </div>
         </div>
@@ -122,6 +136,27 @@
         <!-- Main Feed -->
         <div class="space-y-4" id="mainFeed"></div>
     {% endif %}
+</div>
+
+<!-- SETTINGS MODAL -->
+<div id="settingsModal" class="fixed inset-0 bg-gray-900/80 z-50 hidden flex-col justify-center items-center p-4 backdrop-blur-sm">
+    <div class="bg-white p-6 rounded-3xl w-full max-w-sm shadow-xl border border-gray-200">
+        <h2 class="text-2xl font-black mb-4 text-gray-800">⚙️ Settings</h2>
+        <div class="space-y-4">
+            <div>
+                <label class="text-sm font-bold text-gray-600">Update Username</label>
+                <input type="text" id="settingsUsername" value="{{ current_user.username }}" class="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl mt-1 outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500 font-medium text-gray-800">
+            </div>
+            <div>
+                <label class="text-sm font-bold text-gray-600">Update Password</label>
+                <input type="password" id="settingsPassword" placeholder="New Password (optional)" class="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl mt-1 outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500 font-medium text-gray-800">
+            </div>
+        </div>
+        <div class="flex justify-end gap-3 mt-6 border-t pt-4 border-gray-100">
+            <button onclick="closeSettings()" class="px-4 py-2 text-gray-500 font-bold hover:bg-gray-100 rounded-xl transition">Cancel</button>
+            <button onclick="saveSettings()" class="px-4 py-2 bg-brand-500 text-white font-bold rounded-xl shadow-md hover:bg-brand-600 transition">Save</button>
+        </div>
+    </div>
 </div>
 
 <!-- SECRET VAULT MODAL (Solid Background) -->
@@ -147,19 +182,96 @@
 {% block scripts %}
 <script>
     const csrfToken = document.querySelector('meta[name="csrf-token"]').getAttribute('content');
+    const vapidPublicKey = "{{ vapid_public_key | default('') }}";
+    
     let base64Media = null;
     let mediaType = null;
     let replyingToId = null;
 
     // ==========================================
-    // 1. WIDGETS & LOCATION API
+    // 0. PUSH NOTIFICATIONS & SERVICE WORKER
     // ==========================================
+    if ('serviceWorker' in navigator && 'PushManager' in window && vapidPublicKey) {
+        navigator.serviceWorker.register('/sw.js').then(swReg => {
+            swReg.pushManager.getSubscription().then(sub => {
+                if (!sub && document.getElementById('push-banner')) {
+                    document.getElementById('push-banner').classList.remove('hidden');
+                }
+            });
+        });
+    }
+
+    function urlB64ToUint8Array(base64String) {
+        const padding = '='.repeat((4 - base64String.length % 4) % 4);
+        const base64 = (base64String + padding).replace(/\-/g, '+').replace(/_/g, '/');
+        const rawData = window.atob(base64);
+        const outputArray = new Uint8Array(rawData.length);
+        for (let i = 0; i < rawData.length; ++i) outputArray[i] = rawData.charCodeAt(i);
+        return outputArray;
+    }
+
+    async function subscribePush() {
+        try {
+            const swReg = await navigator.serviceWorker.ready;
+            const sub = await swReg.pushManager.subscribe({
+                userVisibleOnly: true, 
+                applicationServerKey: urlB64ToUint8Array(vapidPublicKey)
+            });
+            await fetch('/api/subscribe', { 
+                method: 'POST', 
+                headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken }, 
+                body: JSON.stringify(sub) 
+            });
+            document.getElementById('push-banner').classList.add('hidden');
+            alert("Notifications enabled! 🎉");
+        } catch(e) { 
+            alert("Please allow notifications in your browser settings."); 
+        }
+    }
+
+    // ==========================================
+    // 1. SETTINGS MODAL
+    // ==========================================
+    function openSettings() { 
+        document.getElementById('settingsModal').classList.remove('hidden'); 
+        document.getElementById('settingsModal').classList.add('flex'); 
+    }
     
+    function closeSettings() { 
+        document.getElementById('settingsModal').classList.add('hidden'); 
+        document.getElementById('settingsModal').classList.remove('flex'); 
+    }
+    
+    async function saveSettings() {
+        const u = document.getElementById('settingsUsername').value.trim();
+        const p = document.getElementById('settingsPassword').value.trim();
+        if(!u) return alert("Username cannot be empty");
+        
+        const payload = { username: u };
+        if(p) payload.password = p; // Only send password if they typed a new one
+
+        const res = await fetch('/api/settings', { 
+            method: 'POST', 
+            headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken }, 
+            body: JSON.stringify(payload) 
+        });
+        
+        if(res.ok) { 
+            alert("Settings saved successfully!"); 
+            closeSettings(); 
+            window.location.reload(); 
+        } else { 
+            alert("Username already taken or invalid."); 
+        }
+    }
+
+    // ==========================================
+    // 2. WIDGETS & LOCATION API
+    // ==========================================
     function syncLocation() {
         if (!navigator.geolocation) {
             return alert("Location not supported by this browser.");
         }
-        
         const icon = document.getElementById('loc-icon');
         icon.innerText = "⏳";
         
@@ -216,9 +328,8 @@
     }
 
     // ==========================================
-    // 2. UI TOGGLES & MEDIA HANDLING
+    // 3. UI TOGGLES & MEDIA HANDLING
     // ==========================================
-    
     const toggle = document.getElementById('isSecretToggle');
     if(toggle) {
         toggle.addEventListener('change', (e) => {
@@ -254,7 +365,6 @@
                 const isSecret = document.getElementById('isSecretToggle').checked;
                 const canvas = document.createElement('canvas');
                 
-                // High Quality for Secrets (1600px), standard for normal (800px)
                 const MAX_WIDTH = isSecret ? 1600 : 800; 
                 let width = img.width, height = img.height;
                 
@@ -281,14 +391,12 @@
     function removeMedia() { 
         base64Media = null; 
         mediaType = null; 
-        document.getElementById('imageInput').value = ''; 
         document.getElementById('mediaPreviewContainer').classList.add('hidden'); 
     }
     
     // ==========================================
-    // 3. DOODLE CANVAS LOGIC
+    // 4. DOODLE CANVAS LOGIC
     // ==========================================
-    
     const canvas = document.getElementById('doodlePad'); 
     let ctx, drawing = false;
     
@@ -346,9 +454,8 @@
     }
 
     // ==========================================
-    // 4. POSTING, REPLIES, & HTML RENDERING
+    // 5. POSTING, REPLIES, & HTML RENDERING
     // ==========================================
-
     function startReply(id) { 
         replyingToId = id; 
         document.getElementById('replying-to-banner').classList.remove('hidden'); 
@@ -432,16 +539,13 @@
         const isDark = isVaultMode || isMySecret;
         const bg = isDark ? 'bg-gray-800 border-gray-700 text-gray-100' : 'bg-white border-gray-200 text-gray-800';
 
-        // NSFW Blur wrapper if it's a secret
         const blurClass = post.is_secret ? 'blur-xl transition duration-500 cursor-pointer' : '';
         const blurOverlay = post.is_secret ? `<div class="absolute inset-0 flex items-center justify-center pointer-events-none text-white font-black drop-shadow-md text-xl z-10" onclick="this.previousElementSibling.click()">Tap to Reveal 🤫</div>` : '';
 
-        // Media + Text Layout
         let mediaHtml = post.media_data ? `<img src="${post.media_data}" class="w-full rounded-xl mt-2 max-h-96 object-contain bg-black/5" loading="lazy">` : '';
         let textHtml = post.text_content ? `<p class="mt-2 text-lg whitespace-pre-wrap ${post.media_data ? 'pt-2' : ''}">${post.text_content}</p>` : '';
         let contentWrap = `<div class="relative overflow-hidden rounded-xl mt-2"><div class="${blurClass}" onclick="unblur(this)">${mediaHtml} ${textHtml}</div>${blurOverlay}</div>`;
 
-        // Facebook-Style Nested Replies
         let repliesHtml = '';
         if (post.replies && post.replies.length > 0) {
             repliesHtml = `<div class="mt-3 space-y-2">`;
@@ -461,7 +565,6 @@
             repliesHtml += `</div>`;
         }
 
-        // Inline Reply Box (Hidden by default)
         let replyBoxHtml = `
             <div id="reply-box-${post.id}" class="hidden mt-3 pt-3 border-t ${isDark ? 'border-gray-700' : 'border-gray-100'} flex gap-2">
                 <input type="text" id="reply-input-${post.id}" placeholder="Write a reply..." class="flex-grow px-3 py-2 rounded-xl text-sm ${isDark ? 'bg-gray-700 text-white border-gray-600' : 'bg-gray-50 border-gray-200 text-gray-800'} outline-none focus:ring-1 focus:ring-brand-500 border">
@@ -469,7 +572,6 @@
             </div>
         `;
 
-        // Badges & Actions
         let badge = isMySecret ? `<div class="text-xs bg-red-500/20 text-red-400 px-2 py-1 rounded-full flex gap-1 items-center font-bold">🤫 My Secret <span class="border-l border-red-500/30 pl-1 ml-1">⏱ ${calculateTimeLeft(post.time_iso)}</span></div>` : `<span class="text-xs font-medium text-gray-400">${post.time}</span>`;
 
         let actionHtml = `
@@ -483,7 +585,6 @@
                 ` : ''}
             </div>`;
 
-        // Reactions
         let reactList = '';
         for (const [emoji, data] of Object.entries(post.reactions)) {
             const btnClass = data.reacted_by_me ? 'bg-brand-100 border-brand-500 text-brand-700' : (isDark ? 'bg-gray-700 border-gray-600 text-white' : 'bg-gray-50 border-gray-200 text-gray-800');
@@ -504,9 +605,8 @@
     }
 
     // ==========================================
-    // 5. POST MODIFICATION & FETCHING
+    // 6. POST MODIFICATION & FETCHING
     // ==========================================
-
     async function deletePost(id) { 
         if(confirm("Delete this post forever?")) { 
             await fetch(`/api/posts/${id}`, { method: 'DELETE', headers: { 'X-CSRFToken': csrfToken } }); 
@@ -540,7 +640,6 @@
         const badge = document.getElementById('secret-count');
         badge.innerText = data.count; 
         
-        // Pulse animation if there are unread secrets
         const vault = document.getElementById('secret-count').parentElement;
         if(data.count > 0) {
             vault.classList.add('animate-pulse');
@@ -571,13 +670,11 @@
         refreshVaultCount(); 
         refreshWidgets(); 
         
-        // Also refresh the vault modal if it is currently open
         if(!document.getElementById('vaultModal').classList.contains('hidden')) {
             openVault();
         }
     }
 
-    // Auto-refresh loops
     if(document.getElementById('mainFeed')) { 
         refreshAll(); 
         setInterval(refreshAll, 10000); 
